@@ -1,58 +1,63 @@
-from net import Socket, newSocket, send, recvLine, connect, Port
-from os import sleep
-from strutils import isEmptyOrWhitespace, split
-import re
+import net, re, strutils, os, threadpool
+
+type Event* = object 
+    message*, user*, channel*: string
 
 type Client* = object
-    token*, id*, displayName*: string
-    socket*: Socket
+    id*, displayName*, token*: string
+    socket: Socket
 
-type Event* = enum
-    MessageEvent,
-    CommandEvent,
+type Events* = enum 
+    MessageEvent, CommandEvent
+
+var addedEvents: array[2, proc(event:Event) {.gcsafe.}]
 
 let 
     messagePattern = re"(^([:!]\w+){2}|\.tmi\.twitch\.tv)"
-    pattern = re"^:tmi\.twitch\.tv \d{3}"
+    pattern = re":(\w+|tmi.twitch.tv) \d{3}"
 
-template loop(body: untyped): void = 
+
+template loop(code: untyped): untyped =
     while true:
-        body
-proc sendMsg*(socket: Socket, msg: string) = socket.send(msg & "\r\n")
+        code
 
-func newClient*(userToken, userId, displayedName: string, userSocket = newSocket()): Client =
-    return Client(token: userToken, id: userId, displayName: displayedName, socket: userSocket)
+template sendMsg(client: Client, message: string) = client.socket.send(message & "\c\L")
+
+func newClient*(id, displayName, token: string, socket=newSocket()): Client = Client(id:id, displayName:displayName, token:token, socket:socket)
 
 proc joinChannel*(client: Client, channel: string) =
-    client.socket.sendMsg("JOIN #" & channel)
+    client.sendMsg("JOIN " & channel)
 
+proc sendChannelMessage*(client: Client, channel, message: string) = client.sendMsg("PRIVMSG " & channel & " :" & message)
+
+func skipIndexTil(array: seq[string], index: int): seq[string] = 
+    var temp = newSeq[string](array.len - index)
+    for i in index..array.len: temp.add(array)
+    return temp
+
+proc addEvent*(client: Client, event: Events, exec: proc(event: Event) {.gcsafe.}) = 
+    case event:
+        of MessageEvent: addedEvents[0] = exec
+        of CommandEvent: addedEvents[1] = exec
+
+proc listen(client: Client) =
+    loop:
+        let msg = client.socket.recvLine().replace(messagePattern)
+        if not (msg.isEmptyOrWhitespace or msg.match(pattern)):
+            let msgFeed = msg.split(" ")
+            if msgFeed[0] == "PING":
+                client.sendMsg(":tmi.twitch.tv PONG")
+            elif msgFeed[1] == "JOIN":
+                echo "joined \e[1m", msgFeed[2], "\e[0m"
+            else: 
+                let feed = msg.split(":")
+                if feed[1][0] != '!':
+                    addedEvents[0](Event(message:feed[1], user:msgFeed[0] , channel:msgFeed[2]))
+                else: 
+                    addedEvents[1](Event(message:feed[1], user:msgFeed[0] , channel:msgFeed[2]))
+        sleep(10)
 proc connectToChat*(client: Client) = 
     client.socket.connect("irc.chat.twitch.tv", Port(6667))
-    client.socket.sendMsg("PASS oauth:" & client.token & "\nNICK " & client.displayName)
-    client.joinChannel(client.displayName)
-
-proc sendChatMessage*(client: Client, channelName, message: string) = 
-    client.socket.sendMsg("PRIVMSG #" & channelName & " :" & message)
-
-proc on*(client: Client, event: Event, timeout: int, exec: proc(channel, user, message: string): void) =  
-    loop:
-        let message = client.socket.recvLine().replace(messagePattern)
-        try:
-            if not (message.isEmptyOrWhitespace or message.match(pattern)):
-                let identifiers = message.split(" ") 
-                if identifiers[0] == "PING":
-                    client.socket.sendMsg("PONG :tmi.twitch.tv")
-                elif identifiers[1] == "JOIN":
-                    stdout.writeLine "joined \e[1m" & identifiers[2] & "\e[0m"
-                else:
-                    let messageFeed = message.split(":") 
-                    case event:
-                        of MessageEvent:
-                          if messageFeed[1][0] != '!':
-                            exec(channel=identifiers[2], user=identifiers[0], message=messageFeed[1])
-                        of CommandEvent:
-                          if messageFeed[1][0] == '!':
-                            exec(channel=identifiers[2], user=identifiers[0], message=messageFeed[1])
-        except:
-            stdout.writeLine("[\e[1;31mERROR\e[0m] message `\e[1m" & message & "\e[0m` have raised `\e[1m" & getCurrentExceptionMsg() & "\e[0m`")
-        sleep(timeout)
+    client.sendMsg("PASS oauth:" & client.token & "\nNICK " & client.displayName)
+    client.joinChannel("#" & client.displayName)
+    client.listen()
