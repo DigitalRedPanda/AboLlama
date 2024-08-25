@@ -11,4 +11,4 @@ bin           = @["bot"]
 # Dependencies
 
 requires "nim >= 2.0.2"
-requires "db_connector >= 0.1.0"
+requires "db_connector >= 0.1.0" 
